@@ -16,7 +16,7 @@ import {
   DeleteOutlined,
   SyncOutlined,
   CheckCircleOutlined,
-  StopOutlined,
+  DeleteFilled,
   BugOutlined,
   FileTextOutlined,
 } from '@ant-design/icons';
@@ -120,6 +120,15 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
         const isPc = !isPhone;
         return (
           <Space size="middle">
+            <Tooltip title={isPc ? '日志' : ''}>
+              <a
+                onClick={() => {
+                  setLogDependence({ ...record, timestamp: Date.now() });
+                }}
+              >
+                <FileTextOutlined />
+              </a>
+            </Tooltip>
             {record.status !== Status.安装中 &&
               record.status !== Status.删除中 && (
                 <>
@@ -133,17 +142,13 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
                       <DeleteOutlined />
                     </a>
                   </Tooltip>
+                  <Tooltip title={isPc ? '强制删除' : ''}>
+                    <a onClick={() => deleteDependence(record, index, true)}>
+                      <DeleteFilled />
+                    </a>
+                  </Tooltip>
                 </>
               )}
-            <Tooltip title={isPc ? '日志' : ''}>
-              <a
-                onClick={() => {
-                  setLogDependence({ ...record, timestamp: Date.now() });
-                }}
-              >
-                <FileTextOutlined />
-              </a>
-            </Tooltip>
           </Space>
         );
       },
@@ -182,7 +187,11 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
     setIsModalVisible(true);
   };
 
-  const deleteDependence = (record: any, index: number) => {
+  const deleteDependence = (
+    record: any,
+    index: number,
+    force: boolean = false,
+  ) => {
     Modal.confirm({
       title: '确认删除',
       content: (
@@ -196,10 +205,19 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
       ),
       onOk() {
         request
-          .delete(`${config.apiPrefix}dependencies`, { data: [record.id] })
+          .delete(`${config.apiPrefix}dependencies${force ? '/force' : ''}`, {
+            data: [record.id],
+          })
           .then((data: any) => {
             if (data.code === 200) {
-              handleDependence(data.data[0]);
+              if (force) {
+                const i = value.findIndex((x) => x.id === data.data[0].id);
+                if (i !== -1) {
+                  const result = [...value];
+                  result.splice(i, 1);
+                  setValue(result);
+                }
+              }
             } else {
               message.error(data);
             }
@@ -253,9 +271,11 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
       result.push(...dependence);
     } else {
       const index = value.findIndex((x) => x.id === dependence.id);
-      result.splice(index, 1, {
-        ...dependence,
-      });
+      if (index !== -1) {
+        result.splice(index, 1, {
+          ...dependence,
+        });
+      }
     }
     setValue(result);
   };
@@ -275,13 +295,16 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
     onChange: onSelectChange,
   };
 
-  const delDependencies = () => {
+  const delDependencies = (force: boolean) => {
+    const forceUrl = force ? '/force' : '';
     Modal.confirm({
       title: '确认删除',
       content: <>确认删除选中的依赖吗</>,
       onOk() {
         request
-          .delete(`${config.apiPrefix}dependencies`, { data: selectedRowIds })
+          .delete(`${config.apiPrefix}dependencies${forceUrl}`, {
+            data: selectedRowIds,
+          })
           .then((data: any) => {
             if (data.code === 200) {
               setSelectedRowIds([]);
@@ -303,11 +326,13 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
       .then((data: any) => {
         const index = value.findIndex((x) => x.id === dependence.id);
         const result = [...value];
-        result.splice(index, 1, {
-          ...dependence,
-          ...data.data,
-        });
-        setValue(result);
+        if (index !== -1) {
+          result.splice(index, 1, {
+            ...dependence,
+            ...data.data,
+          });
+          setValue(result);
+        }
       })
       .finally(() => setLoading(false));
   };
@@ -350,10 +375,12 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
       const result = [...value];
       for (let i = 0; i < references.length; i++) {
         const index = value.findIndex((x) => x.id === references[i]);
-        result.splice(index, 1, {
-          ...result[index],
-          status,
-        });
+        if (index !== -1) {
+          result.splice(index, 1, {
+            ...value[index],
+            status,
+          });
+        }
       }
       setValue(result);
 
@@ -362,7 +389,9 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
           const _result = [...value];
           for (let i = 0; i < references.length; i++) {
             const index = value.findIndex((x) => x.id === references[i]);
-            _result.splice(index, 1);
+            if (index !== -1) {
+              _result.splice(index, 1);
+            }
           }
           setValue(_result);
         }, 5000);
@@ -377,9 +406,16 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
           <Button
             type="primary"
             style={{ marginBottom: 5, marginLeft: 8 }}
-            onClick={delDependencies}
+            onClick={() => delDependencies(false)}
           >
             批量删除
+          </Button>
+          <Button
+            type="primary"
+            style={{ marginBottom: 5, marginLeft: 8 }}
+            onClick={() => delDependencies(true)}
+          >
+            批量强制删除
           </Button>
           <span style={{ marginLeft: 8 }}>
             已选择
@@ -455,8 +491,10 @@ const Dependence = ({ headerStyle, isPhone, socketMessage }: any) => {
           if (needRemove) {
             const index = value.findIndex((x) => x.id === logDependence.id);
             const result = [...value];
-            result.splice(index, 1);
-            setValue(result);
+            if (index !== -1) {
+              result.splice(index, 1);
+              setValue(result);
+            }
           } else if ([...value].map((x) => x.id).includes(logDependence.id)) {
             getDependenceDetail(logDependence);
           }

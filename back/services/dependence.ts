@@ -13,6 +13,8 @@ import _ from 'lodash';
 import { spawn } from 'child_process';
 import SockService from './sock';
 import { Op } from 'sequelize';
+import { concurrentRun } from '../config/util';
+import dayjs from 'dayjs';
 
 @Service()
 export default class DependenceService {
@@ -27,7 +29,7 @@ export default class DependenceService {
       return tab;
     });
     const docs = await this.insert(tabs);
-    this.installOrUninstallDependencies(docs);
+    this.installDependenceOneByOne(docs);
     return docs;
   }
 
@@ -47,7 +49,7 @@ export default class DependenceService {
       status: DependenceStatus.installing,
     });
     const newDoc = await this.updateDb(tab);
-    this.installOrUninstallDependencies([newDoc]);
+    this.installDependenceOneByOne([newDoc]);
     return newDoc;
   }
 
@@ -56,13 +58,13 @@ export default class DependenceService {
     return await this.getDb({ id: payload.id });
   }
 
-  public async remove(ids: number[]) {
+  public async remove(ids: number[], force = false): Promise<Dependence[]> {
     await DependenceModel.update(
       { status: DependenceStatus.removing, log: [] },
       { where: { id: ids } },
     );
     const docs = await DependenceModel.findAll({ where: { id: ids } });
-    this.installOrUninstallDependencies(docs, false);
+    this.installDependenceOneByOne(docs, false, force);
     return docs;
   }
 
@@ -98,6 +100,20 @@ export default class DependenceService {
     }
   }
 
+  private installDependenceOneByOne(
+    docs: Dependence[],
+    isInstall: boolean = true,
+    force: boolean = false,
+  ) {
+    concurrentRun(
+      docs.map(
+        (dep) => async () =>
+          await this.installOrUninstallDependencies([dep], isInstall, force),
+      ),
+      1,
+    );
+  }
+
   public async reInstall(ids: number[]): Promise<Dependence[]> {
     await DependenceModel.update(
       { status: DependenceStatus.installing, log: [] },
@@ -105,7 +121,7 @@ export default class DependenceService {
     );
 
     const docs = await DependenceModel.findAll({ where: { id: ids } });
-    await this.installOrUninstallDependencies(docs);
+    this.installDependenceOneByOne(docs);
     return docs;
   }
 
@@ -128,12 +144,16 @@ export default class DependenceService {
   public installOrUninstallDependencies(
     dependencies: Dependence[],
     isInstall: boolean = true,
+    force: boolean = false,
   ) {
     return new Promise(async (resolve) => {
       if (dependencies.length === 0) {
         resolve(null);
         return;
       }
+      const socketMessageType = !force
+        ? 'installDependence'
+        : 'uninstallDependence';
       const depNames = dependencies.map((x) => x.name).join(' ');
       const depRunCommand = (
         isInstall
@@ -142,24 +162,23 @@ export default class DependenceService {
       )[dependencies[0].type as any];
       const actionText = isInstall ? '安装' : '删除';
       const depIds = dependencies.map((x) => x.id) as number[];
-      const cp = spawn(`${depRunCommand} ${depNames}`, { shell: '/bin/bash' });
-      const startTime = Date.now();
+      const startTime = dayjs();
+
+      const message = `开始${actionText}依赖 ${depNames}，开始时间 ${startTime.format(
+        'YYYY-MM-DD HH:mm:ss',
+      )}\n\n`;
       this.sockService.sendMessage({
-        type: 'installDependence',
-        message: `开始${actionText}依赖 ${depNames}，开始时间 ${new Date(
-          startTime,
-        ).toLocaleString()}`,
+        type: socketMessageType,
+        message,
         references: depIds,
       });
-      await this.updateLog(
-        depIds,
-        `开始${actionText}依赖 ${depNames}，开始时间 ${new Date(
-          startTime,
-        ).toLocaleString()}\n`,
-      );
+      await this.updateLog(depIds, message);
+
+      const cp = spawn(`${depRunCommand} ${depNames}`, { shell: '/bin/bash' });
+
       cp.stdout.on('data', async (data) => {
         this.sockService.sendMessage({
-          type: 'installDependence',
+          type: socketMessageType,
           message: data.toString(),
           references: depIds,
         });
@@ -168,7 +187,7 @@ export default class DependenceService {
 
       cp.stderr.on('data', async (data) => {
         this.sockService.sendMessage({
-          type: 'installDependence',
+          type: socketMessageType,
           message: data.toString(),
           references: depIds,
         });
@@ -177,7 +196,7 @@ export default class DependenceService {
 
       cp.on('error', async (err) => {
         this.sockService.sendMessage({
-          type: 'installDependence',
+          type: socketMessageType,
           message: JSON.stringify(err),
           references: depIds,
         });
@@ -186,23 +205,19 @@ export default class DependenceService {
       });
 
       cp.on('close', async (code) => {
-        const endTime = Date.now();
+        const endTime = dayjs();
         const isSucceed = code === 0;
         const resultText = isSucceed ? '成功' : '失败';
 
+        const message = `\n依赖${actionText}${resultText}，结束时间 ${endTime.format(
+          'YYYY-MM-DD HH:mm:ss',
+        )}，耗时 ${endTime.diff(startTime, 'second')} 秒`;
         this.sockService.sendMessage({
-          type: 'installDependence',
-          message: `依赖${actionText}${resultText}，结束时间 ${new Date(
-            endTime,
-          ).toLocaleString()}，耗时 ${(endTime - startTime) / 1000} 秒`,
+          type: socketMessageType,
+          message,
           references: depIds,
         });
-        await this.updateLog(
-          depIds,
-          `依赖${actionText}${resultText}，结束时间 ${new Date(
-            endTime,
-          ).toLocaleString()}，耗时 ${(endTime - startTime) / 1000} 秒`,
-        );
+        await this.updateLog(depIds, message);
 
         let status = null;
         if (isSucceed) {
@@ -216,11 +231,9 @@ export default class DependenceService {
         }
         await DependenceModel.update({ status }, { where: { id: depIds } });
 
-        // 如果删除依赖成功，3秒后删除数据库记录
-        if (isSucceed && !isInstall) {
-          setTimeout(() => {
-            this.removeDb(depIds);
-          }, 5000);
+        // 如果删除依赖成功或者强制删除
+        if ((isSucceed || force) && !isInstall) {
+          this.removeDb(depIds);
         }
 
         resolve(null);
